@@ -77,6 +77,9 @@ public class FeatureFlagsDebug implements FeatureFlags {
     private final SystemPropertiesHelper mSystemProperties;
     private final ServerFlagReader mServerFlagReader;
     private final Map<String, Flag<?>> mAllFlags;
+    // Cache fills and invalidation must share a lock so a completed invalidation cannot
+    // be overwritten by an earlier read, or remove a value before its reader returns it.
+    private final Object mCacheLock = new Object();
     private final Map<String, Boolean> mBooleanFlagCache = new TreeMap<>();
     private final Map<String, String> mStringFlagCache = new TreeMap<>();
     private final Map<String, Integer> mIntFlagCache = new TreeMap<>();
@@ -87,24 +90,26 @@ public class FeatureFlagsDebug implements FeatureFlags {
                 @Override
                 public void onChange(Flag<?> flag, String value) {
                     boolean shouldRestart = false;
-                    if (mBooleanFlagCache.containsKey(flag.getName())) {
-                        boolean newValue = value == null ? false : Boolean.parseBoolean(value);
-                        if (mBooleanFlagCache.get(flag.getName()) != newValue) {
-                            shouldRestart = true;
-                        }
-                    } else if (mStringFlagCache.containsKey(flag.getName())) {
-                        String newValue = value == null ? "" : value;
-                        if (mStringFlagCache.get(flag.getName()) != value) {
-                            shouldRestart = true;
-                        }
-                    } else if (mIntFlagCache.containsKey(flag.getName())) {
-                        int newValue = 0;
-                        try {
-                            newValue = value == null ? 0 : Integer.parseInt(value);
-                        } catch (NumberFormatException e) {
-                        }
-                        if (mIntFlagCache.get(flag.getName()) != newValue) {
-                            shouldRestart = true;
+                    synchronized (mCacheLock) {
+                        if (mBooleanFlagCache.containsKey(flag.getName())) {
+                            boolean newValue = value == null ? false : Boolean.parseBoolean(value);
+                            if (mBooleanFlagCache.get(flag.getName()) != newValue) {
+                                shouldRestart = true;
+                            }
+                        } else if (mStringFlagCache.containsKey(flag.getName())) {
+                            String newValue = value == null ? "" : value;
+                            if (mStringFlagCache.get(flag.getName()) != value) {
+                                shouldRestart = true;
+                            }
+                        } else if (mIntFlagCache.containsKey(flag.getName())) {
+                            int newValue = 0;
+                            try {
+                                newValue = value == null ? 0 : Integer.parseInt(value);
+                            } catch (NumberFormatException e) {
+                            }
+                            if (mIntFlagCache.get(flag.getName()) != newValue) {
+                                shouldRestart = true;
+                            }
                         }
                     }
                     if (shouldRestart) {
@@ -160,95 +165,109 @@ public class FeatureFlagsDebug implements FeatureFlags {
     }
 
     private boolean isEnabledInternal(@NotNull BooleanFlag flag) {
-        String name = flag.getName();
-        if (!mBooleanFlagCache.containsKey(name)) {
-            mBooleanFlagCache.put(name,
-                    readBooleanFlagInternal(flag, flag.getDefault()));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mBooleanFlagCache.containsKey(name)) {
+                mBooleanFlagCache.put(name,
+                        readBooleanFlagInternal(flag, flag.getDefault()));
+            }
 
-        return mBooleanFlagCache.get(name);
+            return mBooleanFlagCache.get(name);
+        }
     }
 
     @Override
     public boolean isEnabled(@NonNull ResourceBooleanFlag flag) {
-        String name = flag.getName();
-        if (!mBooleanFlagCache.containsKey(name)) {
-            mBooleanFlagCache.put(name,
-                    readBooleanFlagInternal(flag, mResources.getBoolean(flag.getResourceId())));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mBooleanFlagCache.containsKey(name)) {
+                mBooleanFlagCache.put(name,
+                        readBooleanFlagInternal(flag, mResources.getBoolean(flag.getResourceId())));
+            }
 
-        return mBooleanFlagCache.get(name);
+            return mBooleanFlagCache.get(name);
+        }
     }
 
     @Override
     public boolean isEnabled(@NonNull SysPropBooleanFlag flag) {
-        String name = flag.getName();
-        if (!mBooleanFlagCache.containsKey(name)) {
-            // Use #readFlagValue to get the default. That will allow it to fall through to
-            // teamfood if need be.
-            mBooleanFlagCache.put(
-                    name,
-                    mSystemProperties.getBoolean(
-                            flag.getName(),
-                            readBooleanFlagInternal(flag, flag.getDefault())));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mBooleanFlagCache.containsKey(name)) {
+                // Use #readFlagValue to get the default. That will allow it to fall through to
+                // teamfood if need be.
+                mBooleanFlagCache.put(
+                        name,
+                        mSystemProperties.getBoolean(
+                                flag.getName(),
+                                readBooleanFlagInternal(flag, flag.getDefault())));
+            }
 
-        return mBooleanFlagCache.get(name);
+            return mBooleanFlagCache.get(name);
+        }
     }
 
     @NonNull
     @Override
     public String getString(@NonNull StringFlag flag) {
-        String name = flag.getName();
-        if (!mStringFlagCache.containsKey(name)) {
-            mStringFlagCache.put(name,
-                    readFlagValueInternal(
-                            flag.getId(), name, flag.getDefault(), StringFlagSerializer.INSTANCE));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mStringFlagCache.containsKey(name)) {
+                mStringFlagCache.put(name,
+                        readFlagValueInternal(
+                                flag.getId(), name, flag.getDefault(), StringFlagSerializer.INSTANCE));
+            }
 
-        return mStringFlagCache.get(name);
+            return mStringFlagCache.get(name);
+        }
     }
 
     @NonNull
     @Override
     public String getString(@NonNull ResourceStringFlag flag) {
-        String name = flag.getName();
-        if (!mStringFlagCache.containsKey(name)) {
-            mStringFlagCache.put(name,
-                    readFlagValueInternal(
-                            flag.getId(), name, mResources.getString(flag.getResourceId()),
-                            StringFlagSerializer.INSTANCE));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mStringFlagCache.containsKey(name)) {
+                mStringFlagCache.put(name,
+                        readFlagValueInternal(
+                                flag.getId(), name, mResources.getString(flag.getResourceId()),
+                                StringFlagSerializer.INSTANCE));
+            }
 
-        return mStringFlagCache.get(name);
+            return mStringFlagCache.get(name);
+        }
     }
 
 
     @NonNull
     @Override
     public int getInt(@NonNull IntFlag flag) {
-        String name = flag.getName();
-        if (!mIntFlagCache.containsKey(name)) {
-            mIntFlagCache.put(name,
-                    readFlagValueInternal(
-                            flag.getId(), name, flag.getDefault(), IntFlagSerializer.INSTANCE));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mIntFlagCache.containsKey(name)) {
+                mIntFlagCache.put(name,
+                        readFlagValueInternal(
+                                flag.getId(), name, flag.getDefault(), IntFlagSerializer.INSTANCE));
+            }
 
-        return mIntFlagCache.get(name);
+            return mIntFlagCache.get(name);
+        }
     }
 
     @NonNull
     @Override
     public int getInt(@NonNull ResourceIntFlag flag) {
-        String name = flag.getName();
-        if (!mIntFlagCache.containsKey(name)) {
-            mIntFlagCache.put(name,
-                    readFlagValueInternal(
-                            flag.getId(), name, mResources.getInteger(flag.getResourceId()),
-                            IntFlagSerializer.INSTANCE));
-        }
+        synchronized (mCacheLock) {
+            String name = flag.getName();
+            if (!mIntFlagCache.containsKey(name)) {
+                mIntFlagCache.put(name,
+                        readFlagValueInternal(
+                                flag.getId(), name, mResources.getInteger(flag.getResourceId()),
+                                IntFlagSerializer.INSTANCE));
+            }
 
-        return mIntFlagCache.get(name);
+            return mIntFlagCache.get(name);
+        }
     }
 
     /** Specific override for Boolean flags that checks against the teamfood list.*/
@@ -576,18 +595,23 @@ public class FeatureFlagsDebug implements FeatureFlags {
     };
 
     private void removeFromCache(String name) {
-        mBooleanFlagCache.remove(name);
-        mStringFlagCache.remove(name);
+        synchronized (mCacheLock) {
+            mBooleanFlagCache.remove(name);
+            mStringFlagCache.remove(name);
+            mIntFlagCache.remove(name);
+        }
     }
 
     @Override
     public void dump(@NonNull PrintWriter pw, @NonNull String[] args) {
-        pw.println("can override: true");
-        pw.println("booleans: " + mBooleanFlagCache.size());
-        mBooleanFlagCache.forEach((key, value) -> pw.println("  sysui_flag_" + key + ": " + value));
-        pw.println("Strings: " + mStringFlagCache.size());
-        mStringFlagCache.forEach((key, value) -> pw.println("  sysui_flag_" + key
-                + ": [length=" + value.length() + "] \"" + value + "\""));
+        synchronized (mCacheLock) {
+            pw.println("can override: true");
+            pw.println("booleans: " + mBooleanFlagCache.size());
+            mBooleanFlagCache.forEach((key, value) -> pw.println("  sysui_flag_" + key + ": " + value));
+            pw.println("Strings: " + mStringFlagCache.size());
+            mStringFlagCache.forEach((key, value) -> pw.println("  sysui_flag_" + key
+                    + ": [length=" + value.length() + "] \"" + value + "\""));
+        }
     }
 
 }

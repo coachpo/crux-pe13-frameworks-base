@@ -45,6 +45,10 @@ import org.mockito.MockitoAnnotations
 import java.io.PrintWriter
 import java.io.Serializable
 import java.io.StringWriter
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Consumer
 import org.mockito.Mockito.`when` as whenever
 
@@ -526,6 +530,106 @@ class FeatureFlagsDebugTest : SysuiTestCase() {
         assertThat(dump).contains(" sysui_flag_5: [length=12] \"flag5default\"\n")
         assertThat(dump).contains(" sysui_flag_6: [length=12] \"resource1006\"\n")
         assertThat(dump).contains(" sysui_flag_7: [length=9] \"override7\"\n")
+    }
+
+    @Test
+    fun booleanFill_serializesWithInvalidation() {
+        val flag = UnreleasedFlag(100, "concurrent_boolean", "test")
+        val value = AtomicReference(true)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val reads = AtomicInteger()
+        whenever(flagManager.readFlagValue<Boolean>(eq(flag.name), any())).thenAnswer {
+            val result = value.get()
+            if (reads.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            result
+        }
+        assertFillSerializesWithInvalidation(flag.name, entered, release,
+            { value.set(false) }, { featureFlagsDebug.isEnabled(flag) }, true, false)
+    }
+
+    @Test
+    fun stringFill_serializesWithInvalidation() {
+        val flag = StringFlag(101, "concurrent_string", "test", "default")
+        val value = AtomicReference("before")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val reads = AtomicInteger()
+        whenever(flagManager.readFlagValue<String>(eq(flag.name), any())).thenAnswer {
+            val result = value.get()
+            if (reads.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            result
+        }
+        assertFillSerializesWithInvalidation(flag.name, entered, release,
+            { value.set("after") }, { featureFlagsDebug.getString(flag) }, "before", "after")
+    }
+
+    @Test
+    fun intFill_serializesWithInvalidation() {
+        val flag = IntFlag(102, "concurrent_int", "test", 0)
+        val value = AtomicReference(12)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val reads = AtomicInteger()
+        whenever(flagManager.readFlagValue<Int>(eq(flag.name), any())).thenAnswer {
+            val result = value.get()
+            if (reads.incrementAndGet() == 1) {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            result
+        }
+        assertFillSerializesWithInvalidation(flag.name, entered, release,
+            { value.set(48) }, { featureFlagsDebug.getInt(flag) }, 12, 48)
+    }
+
+    private fun <T> assertFillSerializesWithInvalidation(
+        name: String,
+        entered: CountDownLatch,
+        release: CountDownLatch,
+        update: () -> Unit,
+        read: () -> T,
+        before: T,
+        after: T
+    ) {
+        val result = AtomicReference<T>()
+        val failure = AtomicReference<Throwable>()
+        val reader = Thread {
+            try {
+                result.set(read())
+            } catch (t: Throwable) {
+                failure.set(t)
+            }
+        }
+        val invalidator = Thread { clearCacheAction.accept(name) }
+        reader.start()
+        try {
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+            update()
+            invalidator.start()
+            // Coordinate at the actual monitor: invalidation must wait for the in-flight fill.
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (invalidator.state != Thread.State.BLOCKED && invalidator.isAlive &&
+                System.nanoTime() < deadline) {
+                Thread.yield()
+            }
+            assertThat(invalidator.state).isEqualTo(Thread.State.BLOCKED)
+        } finally {
+            release.countDown()
+            reader.join(5000)
+            invalidator.join(5000)
+        }
+        assertThat(reader.isAlive).isFalse()
+        assertThat(invalidator.isAlive).isFalse()
+        failure.get()?.let { throw AssertionError("Concurrent flag read failed", it) }
+        assertThat(result.get()).isEqualTo(before)
+        assertThat(read()).isEqualTo(after)
     }
 
     private fun verifyPutData(name: String, data: String, numReads: Int = 1) {
