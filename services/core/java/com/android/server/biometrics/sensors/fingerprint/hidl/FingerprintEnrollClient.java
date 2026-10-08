@@ -23,6 +23,7 @@ import android.hardware.biometrics.BiometricAuthenticator;
 import android.hardware.biometrics.BiometricFingerprintConstants;
 import android.hardware.biometrics.BiometricStateListener;
 import android.hardware.biometrics.fingerprint.V2_1.IBiometricsFingerprint;
+import android.hardware.biometrics.fingerprint.V2_1.RequestStatus;
 import android.hardware.fingerprint.Fingerprint;
 import android.hardware.fingerprint.FingerprintManager;
 import android.hardware.fingerprint.ISidefpsController;
@@ -107,13 +108,17 @@ public class FingerprintEnrollClient extends EnrollClient<IBiometricsFingerprint
         BiometricNotificationUtils.cancelBadCalibrationNotification(getContext());
         try {
             // GroupId was never used. In fact, groupId is always the same as userId.
-            getFreshDaemon().enroll(mHardwareAuthToken, getTargetUserId(), mTimeoutSec);
+            final int result = getFreshDaemon().enroll(
+                    mHardwareAuthToken, getTargetUserId(), mTimeoutSec);
+            if (result != RequestStatus.SYS_OK) {
+                Slog.w(TAG, "Enroll request failed, result=" + result);
+                onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_HW_UNAVAILABLE,
+                        0 /* vendorCode */);
+            }
         } catch (RemoteException e) {
             Slog.e(TAG, "Remote exception when requesting enroll", e);
             onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_HW_UNAVAILABLE,
                     0 /* vendorCode */);
-            mSensorOverlays.hide(getSensorId());
-            mCallback.onClientFinished(this, false /* success */);
         }
     }
 

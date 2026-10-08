@@ -663,7 +663,7 @@ class AutomaticBrightnessController {
             }
         } else if (mLightSensorEnabled) {
             mLightSensorEnabled = false;
-            mAmbientLuxValid = !mResetAmbientLuxAfterWarmUpConfig;
+            mAmbientLuxValid = mAmbientLuxValid && !mResetAmbientLuxAfterWarmUpConfig;
             if (!mAmbientLuxValid) {
                 mPreThresholdLux = PowerManager.BRIGHTNESS_INVALID_FLOAT;
             }
